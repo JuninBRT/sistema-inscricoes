@@ -1,4 +1,4 @@
-from sqlalchemy import String, DateTime, ForeignKey
+from sqlalchemy import String, DateTime, ForeignKey, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from datetime import datetime
 
@@ -15,6 +15,7 @@ class Inscricao(Base):
     projeto: Mapped[str] = mapped_column(String(100), nullable=False)
     curso: Mapped[str] = mapped_column(String(255), nullable=False)
     ano: Mapped[int] = mapped_column(nullable=False)
+    respostas: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     status: Mapped[str] = mapped_column(String(50), default="inscrito")
     criado_em: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
