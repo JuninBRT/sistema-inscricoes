@@ -95,6 +95,11 @@ ESTADOS_CIVIS = [
     "Solteiro(a)", "Casado(a)", "União estável", "Separado(a)",
     "Divorciado(a)", "Viúvo(a)",
 ]
+PARENTESCOS_CONTATO = [
+    "Mãe", "Pai", "Madrasta", "Padrasto", "Avó", "Avô", "Tia", "Tio",
+    "Irmã", "Irmão", "Filha", "Filho", "Cônjuge", "Companheira(o)",
+    "Amiga(o)", "Vizinha(o)", "Outro",
+]
 RENDA_FAMILIAR = [
     "Sem renda", "Até 1 salário mínimo", "De 1 a 2 salários mínimos",
     "De 2 a 3 salários mínimos", "Acima de 3 salários mínimos",
@@ -123,6 +128,22 @@ LOGO_ACAO_URL = (
 def form_valor(form_data: dict, chave: str) -> str:
     valor = form_data.get(chave, "")
     return "" if valor is None else str(valor).strip()
+
+
+def formatar_telefone(valor: str) -> str:
+    digitos = re.sub(r"\D", "", valor or "")[:11]
+    if not digitos:
+        return ""
+
+    if len(digitos) <= 2:
+        return f"({digitos}"
+
+    ddd = digitos[:2]
+    numero = digitos[2:]
+    if len(numero) <= 5:
+        return f"({ddd}) {numero}"
+
+    return f"({ddd}) {numero[:5]}-{numero[5:]}"
 
 
 def respostas_formulario(form_data: dict) -> dict:
@@ -155,6 +176,9 @@ class FormularioState(rx.State):
     def atualizar_campo(self, nome: str, valor: str):
         self.valores = {**self.valores, nome: valor}
         self.limpar_feedback()
+
+    def atualizar_telefone(self, nome: str, valor: str):
+        self.atualizar_campo(nome, formatar_telefone(valor))
 
     def salvar_respostas(self, form_data: dict) -> dict:
         respostas = {
@@ -419,33 +443,28 @@ GASTRONOMIA_SECTIONS = [
         ],
     ),
     (
-        "Sessão 1 - Identificação da(o) Candidata(o)",
+        "Identificação da(o) Candidata(o)",
         [
             q("Endereço de e-mail", "endereco_email", "email", required=True),
             q("Nome Civil", "nome_civil", required=True, full=True, hint="Como consta em seus documentos como identidade e certidão de nascimento"),
             q("Nome Social", "nome_social", full=True, hint="Caso o seu nome da documentação civil tenha sido modificado, escreva abaixo o seu nome retificado."),
             q("Data de Nascimento", "data_nascimento", "date", required=True, hint="Atenção: Preencha a data de nascimento com cuidado para que não seja informado de forma incorreta (Exemplo: Dia/Mês/Ano)"),
             q("CPF", "cpf", required=True),
-            q("DDD + Celular", "celular", "tel", required=True, hint="Exemplo: (021) 00000-0000"),
-            q("Contato de Emergência", "contato_emergencia", full=True, hint="Nome do contato, parentesco e telefone (Exemplo: Nome e Sobrenome - Mãe - Contato 000 00000-0000)"),
             q("Identidade", "identidade", required=True, hint="Informe apenas os números sem pontuação"),
             q("Órgão Emissor", "orgao_emissor", required=True),
             q("UF do Órgão Emissor", "uf_orgao_emissor", "select", UFS, required=True),
-        ],
-        GASTRONOMIA_IDENTIFICACAO_DESCRICAO,
-        "repeat(auto-fit, minmax(240px, 1fr))",
-    ),
-    (
-        "Endereço e contato",
-        [
+            q("DDD + Celular", "celular", "tel", required=True, hint="Exemplo: (021) 00000-0000"),
             q("CEP", "cep"),
             q("Endereço Completo", "endereco_completo", full=True),
             q("Bairro", "bairro"),
             q("Município", "municipio"),
             q("UF", "uf", "select", UFS),
+            q("Nome do contato de emergência", "contato_emergencia_nome"),
+            q("Parentesco do contato de emergência", "contato_emergencia_parentesco", "select", PARENTESCOS_CONTATO),
+            q("Telefone do contato de emergência", "contato_emergencia_telefone", "tel", hint="Exemplo: (021) 00000-0000"),
         ],
-        None,
-        "repeat(auto-fit, minmax(220px, 1fr))",
+        GASTRONOMIA_IDENTIFICACAO_DESCRICAO,
+        "repeat(auto-fit, minmax(240px, 1fr))",
     ),
     (
         "Perfil social",
@@ -603,6 +622,7 @@ FORMACAO_SECTIONS = [
 
 def campo_nativo(campo: dict) -> rx.Component:
     valor = FormularioState.valores.get(campo["name"], "")
+    telefone = campo["kind"] == "tel"
 
     if campo["kind"] == "select":
         return rx.el.select(
@@ -637,9 +657,15 @@ def campo_nativo(campo: dict) -> rx.Component:
         id=campo["name"],
         type=campo["kind"],
         value=valor,
-        placeholder=campo["placeholder"],
+        placeholder=campo["placeholder"] or ("(00) 00000-0000" if telefone else ""),
         required=campo["required"],
-        on_change=lambda valor: FormularioState.atualizar_campo(campo["name"], valor),
+        on_change=(
+            lambda valor: FormularioState.atualizar_telefone(campo["name"], valor)
+        ) if telefone else (
+            lambda valor: FormularioState.atualizar_campo(campo["name"], valor)
+        ),
+        input_mode="numeric" if telefone else "text",
+        max_length=15 if telefone else None,
         width="100%",
         background="white",
         border="0",
