@@ -52,7 +52,9 @@ def q(
     full: bool = False,
     placeholder: str = "",
     hint: str = "",
-    visible_if: tuple[str, str] | None = None,
+    visible_if: tuple[str, str | list[str]] | None = None,
+    label_link: tuple[str, str] | None = None,
+    subfields: list[dict] | None = None,
 ) -> dict:
     return {
         "label": label,
@@ -64,6 +66,8 @@ def q(
         "placeholder": placeholder,
         "hint": hint,
         "visible_if": visible_if,
+        "label_link": label_link,
+        "subfields": subfields or [],
     }
 
 
@@ -106,15 +110,26 @@ RENDA_FAMILIAR = [
 ]
 MORADIA = ["Própria", "Alugada", "Cedida", "Ocupação", "Situação de rua", "Outra"]
 TIPOS_INSTITUICAO = ["Pública", "Privada", "Comunitária", "Outro"]
-ACEITE = ["Li e aceito"]
+HUB_EQUIPAMENTOS_OPCOES = [
+    "Sim, a minha organização ou projeto é atendido pelo Banco de Alimentos.",
+    "Sim, a minha organização ou projeto é atendido pelo Cozinha Solidária.",
+    "Sim, a minha organização ou projeto já realizou atividades nas Hortas da Ação da Cidadania.",
+    "Não, nunca fui atendido por nenhum equipamento do Hub. Esta é a primeira vez.",
+]
+HUB_EQUIPAMENTOS_ATENDIDOS = HUB_EQUIPAMENTOS_OPCOES[:3]
+ACEITE_DADOS = "Li e Aceito"
+IMAGEM_EXTENSOES_PERMITIDAS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
-SELECT_STYLE = {
+FIELD_CONTROL_STYLE = {
     "width": "100%",
-    "min_height": "40px",
+    "background": "white",
     "border": "0",
     "border_bottom": "1px solid #9ca3af",
     "border_radius": "0",
-    "background": "white",
+}
+SELECT_STYLE = {
+    **FIELD_CONTROL_STYLE,
+    "min_height": "40px",
     "padding": "0 0.75rem",
 }
 
@@ -152,10 +167,72 @@ def respostas_formulario(form_data: dict) -> dict:
     return respostas
 
 
+def campo_visivel(campo: dict, respostas: dict) -> bool:
+    condicao = campo.get("visible_if")
+    if condicao is None:
+        return True
+
+    chave, esperado = condicao
+    valor = form_valor(respostas, chave)
+    if isinstance(esperado, list):
+        return valor in esperado
+    return valor == esperado
+
+
+def primeiro_campo_obrigatorio_faltando(
+    secoes: list,
+    respostas: dict,
+    etapa: int | None = None,
+) -> tuple[int, str] | None:
+    indices = [etapa] if etapa is not None else range(len(secoes))
+    for indice in indices:
+        for campo in secoes[indice][1]:
+            if not campo.get("required") or not campo_visivel(campo, respostas):
+                continue
+            for subcampo in campo.get("subfields", []):
+                if not form_valor(respostas, subcampo["name"]):
+                    return indice, f"{campo['label']} ({subcampo['label']})"
+            if campo.get("subfields"):
+                continue
+            if not form_valor(respostas, campo["name"]):
+                return indice, campo["label"]
+    return None
+
+
+def indice_campo(secoes: list, nome: str) -> int:
+    for indice, secao in enumerate(secoes):
+        for campo in secao[1]:
+            if campo["name"] == nome:
+                return indice
+    return 0
+
+
+def etapa_attr(formulario: str) -> str:
+    return f"etapa_{formulario}"
+
+
+def configuracao_formulario(formulario: str) -> tuple:
+    if formulario == "formacao":
+        return (
+            FORMACAO_SECTIONS, "Formação", "nome_documento", "cpf",
+            "endereco_email", "celular_whatsapp", "curso", True,
+        )
+    return (
+        GASTRONOMIA_SECTIONS, "Escola de Gastronomia Social", "nome_civil", "cpf",
+        "endereco_email", "celular", "primeira_opcao_curso", False,
+    )
+
+
 class FormularioState(rx.State):
     mensagem: str = ""
     erro: bool = False
     valores: dict[str, str] = {}
+    rascunhos_formularios: str = rx.LocalStorage(
+        "{}",
+        name="acao_inscricoes_rascunhos",
+        sync=True,
+    )
+    formulario_atual: str = ""
     etapa_formacao: int = 0
     etapa_gastronomia: int = 0
 
@@ -163,22 +240,104 @@ class FormularioState(rx.State):
         self.mensagem = ""
         self.erro = False
 
-    def iniciar_formacao(self):
-        self.valores = {}
-        self.etapa_formacao = 0
+    def rascunhos_salvos(self) -> dict:
+        try:
+            rascunhos = json.loads(self.rascunhos_formularios or "{}")
+            return rascunhos if isinstance(rascunhos, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def etapa_segura(self, formulario: str, etapa: int | str | None) -> int:
+        total = len(configuracao_formulario(formulario)[0])
+        try:
+            etapa_int = int(etapa or 0)
+        except (TypeError, ValueError):
+            etapa_int = 0
+        return max(0, min(etapa_int, total - 1))
+
+    def salvar_rascunho_formulario(self, formulario: str | None = None):
+        formulario = formulario or self.formulario_atual
+        if not formulario:
+            return
+
+        rascunhos = self.rascunhos_salvos()
+        rascunhos[formulario] = {
+            "valores": self.valores,
+            "etapa": self.etapa_atual(formulario),
+        }
+        self.rascunhos_formularios = json.dumps(rascunhos, ensure_ascii=False)
+
+    def remover_rascunho_formulario(self, formulario: str | None = None):
+        formulario = formulario or self.formulario_atual
+        if not formulario:
+            return
+
+        rascunhos = self.rascunhos_salvos()
+        rascunhos.pop(formulario, None)
+        self.rascunhos_formularios = json.dumps(rascunhos, ensure_ascii=False)
+
+    def etapa_atual(self, formulario: str) -> int:
+        return getattr(self, etapa_attr(formulario))
+
+    def definir_etapa(self, formulario: str, etapa: int):
+        setattr(self, etapa_attr(formulario), etapa)
+        if self.formulario_atual == formulario:
+            self.salvar_rascunho_formulario(formulario)
+
+    def iniciar_formulario(self, formulario: str):
+        self.formulario_atual = formulario
+        rascunho = self.rascunhos_salvos().get(formulario, {})
+        valores = rascunho.get("valores", {}) if isinstance(rascunho, dict) else {}
+        self.valores = valores if isinstance(valores, dict) else {}
+        self.definir_etapa(
+            formulario,
+            self.etapa_segura(
+                formulario,
+                rascunho.get("etapa", 0) if isinstance(rascunho, dict) else 0,
+            ),
+        )
         self.limpar_feedback()
 
+    def iniciar_formacao(self):
+        self.iniciar_formulario("formacao")
+
     def iniciar_gastronomia(self):
-        self.valores = {}
-        self.etapa_gastronomia = 0
-        self.limpar_feedback()
+        self.iniciar_formulario("gastronomia")
 
     def atualizar_campo(self, nome: str, valor: str):
         self.valores = {**self.valores, nome: valor}
+        self.salvar_rascunho_formulario()
         self.limpar_feedback()
 
     def atualizar_telefone(self, nome: str, valor: str):
         self.atualizar_campo(nome, formatar_telefone(valor))
+
+    async def salvar_foto_individual(self, arquivos: list[rx.UploadFile]):
+        if not arquivos:
+            return
+
+        arquivo = arquivos[0]
+        nome_original = os.path.basename(arquivo.filename or "")
+        nome_base, extensao = os.path.splitext(nome_original)
+        extensao = extensao.lower()
+        tipo_conteudo = arquivo.content_type or ""
+
+        if extensao not in IMAGEM_EXTENSOES_PERMITIDAS or (
+            tipo_conteudo and not tipo_conteudo.startswith("image/")
+        ):
+            self.erro = True
+            self.mensagem = "Envie uma imagem nos formatos JPG, PNG, GIF, WEBP, BMP ou TIFF."
+            return
+
+        nome_seguro = slug(nome_base) or "foto_individual"
+        sufixo = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        nome_arquivo = f"{nome_seguro}_{sufixo}{extensao}"
+        caminho = rx.get_upload_dir() / nome_arquivo
+        caminho.write_bytes(await arquivo.read())
+
+        self.valores = {**self.valores, "foto_individual": nome_arquivo}
+        self.salvar_rascunho_formulario()
+        self.limpar_feedback()
 
     def salvar_respostas(self, form_data: dict) -> dict:
         respostas = {
@@ -186,35 +345,104 @@ class FormularioState(rx.State):
             **{chave: form_valor(form_data, chave) for chave in form_data},
         }
         self.valores = respostas
+        self.salvar_rascunho_formulario()
         return respostas
 
-    def voltar_formacao(self):
+    def validar_campos_obrigatorios(
+        self,
+        secoes: list,
+        respostas: dict,
+        etapa: int | None = None,
+        formulario: str | None = None,
+    ) -> bool:
+        faltando = primeiro_campo_obrigatorio_faltando(secoes, respostas, etapa)
+        if faltando is None:
+            return True
+
+        indice, label = faltando
+        if formulario:
+            self.definir_etapa(formulario, indice)
+
+        self.erro = True
+        self.mensagem = f"Preencha o campo obrigatório: {label}"
+        return False
+
+    def voltar_formulario(self, formulario: str):
         self.limpar_feedback()
-        if self.etapa_formacao > 0:
-            self.etapa_formacao -= 1
+        etapa = self.etapa_atual(formulario)
+        if etapa > 0:
+            self.definir_etapa(formulario, etapa - 1)
+
+    def voltar_formacao(self):
+        self.voltar_formulario("formacao")
 
     def voltar_gastronomia(self):
+        self.voltar_formulario("gastronomia")
+
+    def avancar_ou_enviar_formulario(
+        self,
+        form_data: dict,
+        formulario: str,
+    ):
+        secoes = configuracao_formulario(formulario)[0]
+        form_data = self.salvar_respostas(form_data)
+        etapa = self.etapa_atual(formulario)
+        if not self.validar_campos_obrigatorios(
+            secoes,
+            form_data,
+            etapa,
+            formulario,
+        ):
+            return
+
+        if etapa >= len(secoes) - 1:
+            self.validar_e_enviar_formulario(form_data, formulario)
+            return
+
+        self.definir_etapa(formulario, etapa + 1)
         self.limpar_feedback()
-        if self.etapa_gastronomia > 0:
-            self.etapa_gastronomia -= 1
 
     def avancar_ou_enviar_formacao(self, form_data: dict):
-        if self.etapa_formacao >= len(FORMACAO_SECTIONS) - 1:
-            self.enviar_formacao(form_data)
-            return
-
-        self.salvar_respostas(form_data)
-        self.etapa_formacao += 1
-        self.limpar_feedback()
+        self.avancar_ou_enviar_formulario(form_data, "formacao")
 
     def avancar_ou_enviar_gastronomia(self, form_data: dict):
-        if self.etapa_gastronomia >= len(GASTRONOMIA_SECTIONS) - 1:
-            self.enviar_gastronomia(form_data)
+        self.avancar_ou_enviar_formulario(form_data, "gastronomia")
+
+    def validar_e_enviar_formulario(
+        self,
+        form_data: dict,
+        formulario: str,
+    ):
+        (
+            secoes, projeto, nome_chave, cpf_chave,
+            email_chave, telefone_chave, curso_chave, exigir_consentimento,
+        ) = configuracao_formulario(formulario)
+        form_data = self.salvar_respostas(form_data)
+        if not self.validar_campos_obrigatorios(
+            secoes,
+            form_data,
+            formulario=formulario,
+        ):
             return
 
-        self.salvar_respostas(form_data)
-        self.etapa_gastronomia += 1
-        self.limpar_feedback()
+        if exigir_consentimento and form_valor(form_data, "consentimento_dados") != ACEITE_DADOS:
+            self.definir_etapa(formulario, indice_campo(secoes, "consentimento_dados"))
+            self.erro = True
+            self.mensagem = (
+                'Para finalizar a inscrição, selecione "Li e Aceito" na pergunta '
+                "sobre tratamento dos dados."
+            )
+            return
+
+        self.enviar_inscricao(
+            projeto,
+            form_data,
+            nome_chave,
+            cpf_chave,
+            email_chave,
+            telefone_chave,
+            curso_chave,
+        )
 
     def tratar_erro(self, erro: Exception):
         self.erro = True
@@ -264,30 +492,15 @@ class FormularioState(rx.State):
             enviar_json("/inscricoes/", dados)
             self.erro = False
             self.mensagem = "Inscrição enviada com sucesso."
+            self.remover_rascunho_formulario()
         except Exception as erro:
             self.tratar_erro(erro)
 
     def enviar_formacao(self, form_data: dict):
-        self.enviar_inscricao(
-            "Formação",
-            form_data,
-            "nome_documento",
-            "cpf",
-            "endereco_email",
-            "celular_whatsapp",
-            "curso",
-        )
+        self.validar_e_enviar_formulario(form_data, "formacao")
 
     def enviar_gastronomia(self, form_data: dict):
-        self.enviar_inscricao(
-            "Escola de Gastronomia Social",
-            form_data,
-            "nome_civil",
-            "cpf",
-            "endereco_email",
-            "celular",
-            "primeira_opcao_curso",
-        )
+        self.validar_e_enviar_formulario(form_data, "gastronomia")
 
 
 GASTRONOMIA_CURSO_POPULAR = (
@@ -295,6 +508,17 @@ GASTRONOMIA_CURSO_POPULAR = (
     "Quartas das 10:00 as 16:00"
 )
 GASTRONOMIA_CURSOS_OPCOES = [GASTRONOMIA_CURSO_POPULAR]
+FORMACAO_CURSOS_OPCOES = [
+    "Canto",
+    "Caracterização e Maquiagem",
+    "Cenografia",
+    "Circo",
+    "Dança",
+    "Dramaturgia",
+    "Figurino e Indumentária",
+    "Interpretação",
+    "Produção Cultural",
+]
 GASTRONOMIA_REINGRESSO = [
     "Sim, desejo aplicar pela primeira vez para o processo seletivo de ingresso na Escola.",
     "Não, já concluí uma formação na Escola e gostaria de aplicar para a modalidade de reingresso.",
@@ -414,6 +638,19 @@ GASTRONOMIA_IDENTIFICACAO_DESCRICAO = [
     )
 ]
 
+GASTRONOMIA_DADOS_SOCIODEMOGRAFICOS_DESCRICAO = [
+    (
+        "Nesta seção você compartilhará conosco informações pessoais que nos ajudarão "
+        "a compreender melhor o perfil das pessoas interessadas nos cursos da Escola "
+        "de Gastronomia Social da Ação da Cidadania.\n\n"
+        "Esses dados são importantes para que possamos aprimorar as nossas ações "
+        "formativas, fortalecer a inclusão e garantir que nossas oportunidades "
+        "cheguem a diferentes públicos.\n\n"
+        "Importante: As informações serão utilizadas apenas para fins institucionais "
+        "com total sigilo e respeito à privacidade dos (as) participantes."
+    )
+]
+
 
 GASTRONOMIA_SECTIONS = [
     (
@@ -467,7 +704,7 @@ GASTRONOMIA_SECTIONS = [
         "repeat(auto-fit, minmax(240px, 1fr))",
     ),
     (
-        "Perfil social",
+        "Dados sociodemográficos",
         [
             q("Gênero", "genero", "select", GENEROS),
             q("Orientação sexual", "orientacao_sexual", "select", ORIENTACOES),
@@ -487,7 +724,7 @@ GASTRONOMIA_SECTIONS = [
             q("Você tem acesso a benefícios ou programas sociais?", "beneficios_sociais", "select", SIM_NAO),
             q("Quais benefícios ou programas sociais?", "quais_beneficios_sociais", full=True, visible_if=("beneficios_sociais", "Sim")),
         ],
-        None,
+        GASTRONOMIA_DADOS_SOCIODEMOGRAFICOS_DESCRICAO,
         "repeat(auto-fit, minmax(240px, 1fr))",
     ),
     (
@@ -500,8 +737,9 @@ GASTRONOMIA_SECTIONS = [
             q("Possui algum Micro ou Pequeno Empreendimento Local ou de Base Comunitária no campo da alimentação?", "possui_empreendimento_alimentacao", "select", SIM_NAO, full=True),
             q("Se sim, compartilhe conosco o link ou página do seu negócio (opcional)", "link_negocio", "url", full=True, visible_if=("possui_empreendimento_alimentacao", "Sim")),
             q("Possui Cartão Nacional de Saúde (Cartão SUS)?", "cartao_sus", "select", SIM_NAO),
-            q("Pertence à alguma organização ou projeto social atendido por equipamentos pertencentes ao Hub de Segurança Alimentar da Ação da Cidadania?", "organizacao_projeto_social_hub", "select", SIM_NAO, full=True),
-            q("Qual organização ou projeto social?", "qual_organizacao_projeto_social", full=True, visible_if=("organizacao_projeto_social_hub", "Sim")),
+            q("Pertence à alguma organização ou projeto social atendido por equipamentos pertencentes ao Hub de Segurança Alimentar da Ação da Cidadania?", "organizacao_projeto_social_hub", "select", HUB_EQUIPAMENTOS_OPCOES, full=True),
+            q("Qual organização ou projeto social?", "qual_organizacao_projeto_social", full=True, visible_if=("organizacao_projeto_social_hub", HUB_EQUIPAMENTOS_ATENDIDOS)),
+            q("Escreva sobre a sua trajetória ou experiência em cozinha (formal ou informal) com as suas palavras", "trajetoria_cozinha", "textarea", full=True, visible_if=("organizacao_projeto_social_hub", HUB_EQUIPAMENTOS_ATENDIDOS)),
             q("Reside em alguma comunidade ou território no entorno do local onde o curso será executado?", "reside_comunidade_entorno", "select", SIM_NAO, full=True),
             q("Qual comunidade ou território?", "qual_comunidade_entorno", full=True, visible_if=("reside_comunidade_entorno", "Sim")),
         ],
@@ -533,18 +771,24 @@ GASTRONOMIA_SECTIONS = [
             q("Como você se imagina daqui 2, 4 ou 5 anos?", "imagina_futuro", "textarea", full=True),
             q("Conte para nós porque deseja fazer um curso na Escola de Gastronomia Social e de que forma podemos contribuir com a sua formação profissional", "motivo_escola_gastronomia", "textarea", full=True),
             q("Cite 3 defeitos seus", "defeitos", "textarea", full=True),
-            q("Caso não seja possível a primeira opção, assinale abaixo qual seria a segunda opção de curso?", "segunda_opcao_curso"),
-            q("E caso não sejam possíveis a primeira e segunda opções, qual seria a sua terceira opção de curso?", "terceira_opcao_curso"),
-            q("Qual é o seu custo diário com deslocamento e passagem considerando o trajeto local de origem e como destino a Escola de Gastronomia Social (Rua da Gamboa, 246, Santo Cristo - Rio de Janeiro)?", "custo_diario_deslocamento"),
+            q(
+                "Qual é o seu custo diário com deslocamento e passagem considerando o trajeto local de origem e como destino a Escola de Gastronomia Social (Rua da Gamboa, 246, Santo Cristo - Rio de Janeiro)?",
+                "custo_diario_deslocamento",
+                "currency_pair",
+                full=True,
+                subfields=[
+                    {"label": "Ida", "name": "custo_diario_deslocamento_ida"},
+                    {"label": "Volta", "name": "custo_diario_deslocamento_volta"},
+                ],
+            ),
             q("Qual é a empresa concessionária utilizada para deslocamento no trajeto acima sinalizado?", "concessionaria_deslocamento"),
-            q("Escreva sobre a sua trajetória ou experiência em cozinha (formal ou informal) com as suas palavras", "trajetoria_cozinha", "textarea", full=True),
             
         ],
     ),
     (
         "Histórico na Escola de Gastronomia",
         [
-            q("Carregue aqui a sua foto individual", "foto_individual", "url", placeholder="Link da foto individual"),
+            q("Carregue aqui a sua foto individual", "foto_individual", "image_file", full=True),
             q("Qual(is) formações você já cursou na Escola de Gastronomia Social?", "formacoes_ja_cursadas", "textarea", full=True, visible_if=("primeira_formacao_egs", GASTRONOMIA_REINGRESSO[1])),
             q("Assinale abaixo o(s) ano(s) no qual você realizou anteriormente formações na Escola", "anos_formacoes_anteriores", full=True, visible_if=("primeira_formacao_egs", GASTRONOMIA_REINGRESSO[1])),
             
@@ -552,13 +796,54 @@ GASTRONOMIA_SECTIONS = [
     ),
 ]
 
+FORMACAO_APRESENTACAO = [
+    (
+        "O Projeto FormAção Ação da Cidadania & Shell 2026 oferece cursos gratuitos "
+        "em 9 áreas artísticas, com foco em prática, teoria e formação cidadão. "
+        "Com carga horária total de 200 horas/aula, os cursos serão realizados "
+        "entre abril e dezembro de 2026.\n\n"
+        "Podem se inscrever pessoas a partir de 18 anos, residentes na região "
+        "metropolitana do Rio de Janeiro, em situação de vulnerabilidade social. "
+        "*Cada candidato pode se inscrever em apenas um curso e alunos de 2024 e "
+        "2025 não podem participar dos cursos em 2026.*\n\n"
+        "Os estudantes selecionados receberão uma bolsa incentivo mensal de R$450, "
+        "para apoio com transporte e alimentação, condicionada à frequência mensal "
+        "mínima de 70%.\n\n\n\n"
+        "*As inscrições devem ser realizadas por meio deste formulário, de 9 de "
+        "fevereiro a 3 de março de 2026.\n\n"
+        "*O processo seletivo inclui análise do formulário e uma conversa com a "
+        "banca pedagógica.\n\n\n\n"
+        "O Projeto FormAção Ação da Cidadania & Shell é realizado pela Ação da "
+        "Cidadania, via Lei Federal de Incentivo à Cultura e tem patrocínio master "
+        "da Shell.\n\n\n\n"
+        "📅 Inscrições: 09/02 a 03/03/2026\n\n"
+        "✅ Divulgação do resultado: 23/03/2026\n\n"
+        "📍 Início das aulas: 27/04/2026\n\n\n\n"
+        "Tem alguma dúvida?\n\n"
+        "Entre em contato conosco pelo e-mail "
+        "edital.formacao2026@projetos.acaodacidadania.org.br\n\n\n\n"
+        "Boa inscrição!"
+    )
+]
+
 FORMACAO_SECTIONS = [
+    (
+        "Apresentação",
+        [],
+        FORMACAO_APRESENTACAO,
+    ),
     (
         "Curso e aceite",
         [
             q("Endereço de e-mail", "endereco_email", "email", required=True),
-            q("Você leu o Edital do projeto? Caso não tenha lido, acesse através do link https://abrelink.me/XoU", "leu_edital", "select", SIM_NAO),
-            q("Escolha seu curso", "curso", required=True),
+            q(
+                "Você leu o Edital do projeto? Caso não tenha lido, acesse através do link",
+                "leu_edital",
+                "select",
+                SIM_NAO,
+                label_link=("https://abrelink.me/eVI", "https://abrelink.me/eVI"),
+            ),
+            q("Escolha seu curso", "curso", "select", FORMACAO_CURSOS_OPCOES, required=True),
         ],
     ),
     (
@@ -570,12 +855,12 @@ FORMACAO_SECTIONS = [
             q("Possui nome Artístico?", "possui_nome_artistico", "select", SIM_NAO),
             q("Nome Artístico", "nome_artistico", required=True, visible_if=("possui_nome_artistico", "Sim")),
             q("Possui algum tipo de deficiência?", "possui_deficiencia", "select", SIM_NAO),
-            q("Pessoa com Deficiência", "pessoa_com_deficiencia", required=True, visible_if=("possui_deficiencia", "Sim")),
+            q("Qual a sua Deficiência?", "qual_a_sua_deficiencia", required=True, visible_if=("possui_deficiencia", "Sim")),
             q("Data de Nascimento", "data_nascimento", "date"),
             q("Digite seu CPF - Apenas números", "cpf", required=True),
-            q("Digite seu documento de Identidade - Apenas números", "identidade"),
-            q("Órgão Emissor", "orgao_emissor"),
-            q("UF do Órgão Emissor", "uf_orgao_emissor", "select", UFS),
+            q("Digite seu documento de Identidade - Apenas números", "identidade", required=True,),
+            q("Órgão Emissor", "orgao_emissor", required=True,),
+            q("UF do Órgão Emissor", "uf_orgao_emissor", "select", UFS, required=True,),
             q("Número de celular com DDD / WhatsApp", "celular_whatsapp", "tel"),
         ],
     ),
@@ -588,7 +873,9 @@ FORMACAO_SECTIONS = [
             q("Qual formação na área cultural você realizou?", "qual_formacao_area_cultural", visible_if=("formacao_area_cultural", "Sim")),
             q("Você trabalha na área cultural?", "trabalha_area_cultural_opcao", "select", SIM_NAO),
             q("Se sim, como trabalha na área cultural?", "trabalha_area_cultural", "textarea", full=True, visible_if=("trabalha_area_cultural_opcao", "Sim")),
-            q("Contato de Emergência (Nome e Telefone)", "contato_emergencia"),
+            q("Nome do contato de emergência", "contato_emergencia_nome"),
+            q("Parentesco do contato de emergência", "contato_emergencia_parentesco", "select", PARENTESCOS_CONTATO),
+            q("Telefone do contato de emergência", "contato_emergencia_telefone", "tel", hint="Exemplo: (021) 00000-0000"),
         ],
     ),
     (
@@ -614,7 +901,7 @@ FORMACAO_SECTIONS = [
             q("Nome da instituição de ensino", "instituicao_ensino"),
             q("Tipo da instituição de ensino", "tipo_instituicao_ensino", "select", TIPOS_INSTITUICAO),
             q("Foi bolsista?", "bolsista", "select", SIM_NAO),
-            q("Ao submeter o formulário de inscrição, você concorda expressamente com o tratamento dos dados no seu interesse, além de concordar com a política de privacidade e proteção de dados da Ação da Cidadania.", "consentimento_dados", "select", ACEITE, True, True),
+            q("Ao submeter o formulário de inscrição, você concorda expressamente com o tratamento dos dados no seu interesse, além de concordar com a política de privacidade e proteção de dados da Ação da Cidadania.", "consentimento_dados", "select", [ACEITE_DADOS], True, True),
         ],
     ),
 ]
@@ -623,6 +910,66 @@ FORMACAO_SECTIONS = [
 def campo_nativo(campo: dict) -> rx.Component:
     valor = FormularioState.valores.get(campo["name"], "")
     telefone = campo["kind"] == "tel"
+
+    if campo["kind"] == "currency_pair":
+        return rx.grid(
+            *[
+                rx.vstack(
+                    rx.text(f"{subcampo['label']}: R$", size="1", weight="medium"),
+                    rx.input(
+                        name=subcampo["name"],
+                        id=subcampo["name"],
+                        type="text",
+                        value=FormularioState.valores.get(subcampo["name"], ""),
+                        placeholder="0,00",
+                        on_change=lambda valor, nome=subcampo["name"]: (
+                            FormularioState.atualizar_campo(nome, valor)
+                        ),
+                        input_mode="decimal",
+                        **FIELD_CONTROL_STYLE,
+                    ),
+                    spacing="1",
+                    align="stretch",
+                    width="100%",
+                )
+                for subcampo in campo["subfields"]
+            ],
+            gap="1rem",
+            width="100%",
+            grid_template_columns="repeat(auto-fit, minmax(160px, 1fr))",
+        )
+
+    if campo["kind"] == "image_file":
+        return rx.vstack(
+            rx.upload(
+                rx.vstack(
+                    rx.text("Clique para selecionar uma imagem ou arraste o arquivo aqui", size="2"),
+                    rx.text("JPG, PNG, GIF, WEBP, BMP ou TIFF", size="1", color="gray.11"),
+                    spacing="1",
+                    align="center",
+                    width="100%",
+                ),
+                id=f"{campo['name']}_upload",
+                accept={"image/*": sorted(IMAGEM_EXTENSOES_PERMITIDAS)},
+                multiple=False,
+                max_files=1,
+                on_drop=FormularioState.salvar_foto_individual,
+                width="100%",
+                border="1px dashed #9ca3af",
+                border_radius="8px",
+                background="white",
+                padding="0.9rem",
+                cursor="pointer",
+            ),
+            rx.cond(
+                valor != "",
+                rx.text("Arquivo selecionado: ", valor, size="1", color="gray.11"),
+                rx.text("Nenhum arquivo selecionado.", size="1", color="gray.11"),
+            ),
+            spacing="1",
+            align="stretch",
+            width="100%",
+        )
 
     if campo["kind"] == "select":
         return rx.el.select(
@@ -644,12 +991,8 @@ def campo_nativo(campo: dict) -> rx.Component:
             placeholder=campo["placeholder"],
             required=campo["required"],
             on_change=lambda valor: FormularioState.atualizar_campo(campo["name"], valor),
-            width="100%",
             min_height="112px",
-            background="white",
-            border="0",
-            border_bottom="1px solid #9ca3af",
-            border_radius="0",
+            **FIELD_CONTROL_STYLE,
         )
 
     return rx.input(
@@ -666,12 +1009,57 @@ def campo_nativo(campo: dict) -> rx.Component:
         ),
         input_mode="numeric" if telefone else "text",
         max_length=15 if telefone else None,
-        width="100%",
-        background="white",
-        border="0",
-        border_bottom="1px solid #9ca3af",
-        border_radius="0",
+        **FIELD_CONTROL_STYLE,
     )
+
+
+def campo_html_for(campo: dict) -> str:
+    subfields = campo.get("subfields", [])
+    if subfields:
+        return subfields[0]["name"]
+    return campo["name"]
+
+
+def rotulo_campo(campo: dict) -> rx.Component:
+    rotulo = rx.text(
+        campo["label"],
+        as_="label",
+        html_for=campo_html_for(campo),
+        size="2",
+        weight="medium",
+    )
+    label_link = campo.get("label_link")
+    if not label_link:
+        return rotulo
+
+    texto, href = label_link
+    return rx.hstack(
+        rotulo,
+        rx.link(
+            texto,
+            href=href,
+            target="_blank",
+            color=FORM_RED,
+            text_decoration="underline",
+        ),
+        spacing="1",
+        align="center",
+        wrap="wrap",
+    )
+
+
+def condicao_visivel_rx(campo: dict):
+    chave, esperado = campo["visible_if"]
+    valor_atual = FormularioState.valores.get(chave, "")
+    if not isinstance(esperado, list):
+        return valor_atual == esperado
+    if not esperado:
+        return False
+
+    condicao = valor_atual == esperado[0]
+    for opcao in esperado[1:]:
+        condicao = condicao | (valor_atual == opcao)
+    return condicao
 
 
 def campo_publico(campo: dict) -> rx.Component:
@@ -685,7 +1073,7 @@ def campo_publico(campo: dict) -> rx.Component:
 
     componente = rx.vstack(
         rx.hstack(
-            rx.text(campo["label"], as_="label", html_for=campo["name"], size="2", weight="medium"),
+            rotulo_campo(campo),
             *marcador,
             align="center",
             justify="between",
@@ -700,15 +1088,14 @@ def campo_publico(campo: dict) -> rx.Component:
         height="100%",
         background="#f3f4f2",
         padding="0.55rem 0.65rem",
-        grid_column="1 / -1" if campo["full"] or campo["kind"] == "textarea" else "auto",
+        grid_column="1 / -1" if campo["full"] or campo["kind"] in ["textarea", "currency_pair"] else "auto",
     )
 
     if campo["visible_if"] is None:
         return componente
 
-    chave, valor = campo["visible_if"]
     return rx.cond(
-        FormularioState.valores.get(chave, "") == valor,
+        condicao_visivel_rx(campo),
         componente,
         rx.fragment(),
     )
@@ -762,14 +1149,26 @@ def feedback_publico() -> rx.Component:
     return rx.cond(
         FormularioState.mensagem != "",
         rx.box(
-            rx.text(FormularioState.mensagem, weight="medium"),
-            border="1px solid",
-            border_color=rx.cond(FormularioState.erro, "red.7", "green.7"),
-            background=rx.cond(FormularioState.erro, "red.2", "green.2"),
-            color=rx.cond(FormularioState.erro, "red.12", "green.12"),
+            rx.text(
+                FormularioState.mensagem,
+                size="2",
+                weight="bold",
+                style={
+                    "color": rx.cond(FormularioState.erro, "#b42318", "#067647"),
+                },
+            ),
+            role="alert",
             border_radius="8px",
             padding="0.85rem",
             width="100%",
+            style={
+                "background_color": rx.cond(FormularioState.erro, "#fef3f2", "#ecfdf3"),
+                "border": rx.cond(
+                    FormularioState.erro,
+                    "1px solid #f04438",
+                    "1px solid #12b76a",
+                ),
+            },
         ),
     )
 
@@ -968,6 +1367,7 @@ def pagina_formulario(
                     width="100%",
                 ),
                 on_submit=on_submit,
+                no_validate=True,
                 reset_on_submit=False,
                 width="100%",
                 padding="2rem 3rem 2.5rem",

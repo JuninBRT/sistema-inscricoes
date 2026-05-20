@@ -1,42 +1,40 @@
-from pydantic import BaseModel, EmailStr
 from typing import Any
-from typing import Optional
+
+from pydantic import BaseModel, ConfigDict
 
 
 class InscricaoCreate(BaseModel):
     nome: str
     cpf: str
-    email: Optional[str] = None
-    telefone: Optional[str] = None
+    email: str | None = None
+    telefone: str | None = None
 
     projeto: str
     curso: str
-    ano: Optional[int] = None
-    respostas: Optional[dict[str, Any]] = None
+    ano: int | None = None
+    respostas: dict[str, Any] | None = None
 
 
-class InscricaoResponse(BaseModel):
+class FromAttributesModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InscricaoResponse(FromAttributesModel):
     id: int
     aluno_id: int
     projeto: str
     curso: str
     ano: int
     status: str
-    respostas: Optional[dict[str, Any]] = None
-
-    class Config:
-        from_attributes = True
+    respostas: dict[str, Any] | None = None
 
 
-class HistoricoInscricao(BaseModel):
+class HistoricoInscricao(FromAttributesModel):
     projeto: str
     curso: str
     ano: int
     status: str
-    respostas: Optional[dict[str, Any]] = None
-
-    class Config:
-        from_attributes = True
+    respostas: dict[str, Any] | None = None
 
 
 class InscricaoComAlerta(BaseModel):
@@ -45,15 +43,12 @@ class InscricaoComAlerta(BaseModel):
     historico_anterior: list[HistoricoInscricao]
 
 
-class AlunoConsulta(BaseModel):
+class AlunoConsulta(FromAttributesModel):
     id: int
     nome: str
     cpf: str
-    email: Optional[str] = None
-    telefone: Optional[str] = None
-
-    class Config:
-        from_attributes = True
+    email: str | None = None
+    telefone: str | None = None
 
 
 class AlunoComHistorico(BaseModel):

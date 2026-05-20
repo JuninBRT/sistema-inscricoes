@@ -29,21 +29,24 @@ def montar_historico(aluno: Aluno) -> list[Inscricao]:
     )
 
 
+def validar_campos_obrigatorios(campos: dict[str, str]):
+    for nome, valor in campos.items():
+        if not str(valor or "").strip():
+            raise HTTPException(status_code=400, detail=f"{nome} é obrigatório")
+
+
 @router.post("/", response_model=InscricaoComAlerta)
 def criar_inscricao(dados: InscricaoCreate, db: Session = Depends(get_db)):
     cpf = normalizar_cpf(dados.cpf)
 
-    if not dados.nome.strip():
-        raise HTTPException(status_code=400, detail="Nome é obrigatório")
-
-    if not cpf:
-        raise HTTPException(status_code=400, detail="CPF é obrigatório")
-
-    if not dados.projeto.strip():
-        raise HTTPException(status_code=400, detail="Projeto é obrigatório")
-
-    if not dados.curso.strip():
-        raise HTTPException(status_code=400, detail="Curso é obrigatório")
+    validar_campos_obrigatorios(
+        {
+            "Nome": dados.nome,
+            "CPF": cpf,
+            "Projeto": dados.projeto,
+            "Curso": dados.curso,
+        }
+    )
 
     aluno = db.query(Aluno).filter(Aluno.cpf == cpf).first()
 
