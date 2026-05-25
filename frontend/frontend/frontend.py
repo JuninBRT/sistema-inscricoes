@@ -207,6 +207,19 @@ def indice_campo(secoes: list, nome: str) -> int:
     return 0
 
 
+def nomes_campo(campo: dict) -> list[str]:
+    subcampos = campo.get("subfields", [])
+    if subcampos:
+        return [subcampo["name"] for subcampo in subcampos]
+    return [campo["name"]]
+
+
+def campos_etapa(secoes: list, etapa: int | None) -> list[dict]:
+    if etapa is None or etapa < 0 or etapa >= len(secoes):
+        return []
+    return secoes[etapa][1]
+
+
 def etapa_attr(formulario: str) -> str:
     return f"etapa_{formulario}"
 
@@ -226,6 +239,7 @@ def configuracao_formulario(formulario: str) -> tuple:
 class FormularioState(rx.State):
     mensagem: str = ""
     erro: bool = False
+    inscricao_enviada: bool = False
     valores: dict[str, str] = {}
     rascunhos_formularios: str = rx.LocalStorage(
         "{}",
@@ -286,6 +300,7 @@ class FormularioState(rx.State):
 
     def iniciar_formulario(self, formulario: str):
         self.formulario_atual = formulario
+        self.inscricao_enviada = False
         rascunho = self.rascunhos_salvos().get(formulario, {})
         valores = rascunho.get("valores", {}) if isinstance(rascunho, dict) else {}
         self.valores = valores if isinstance(valores, dict) else {}
@@ -339,11 +354,30 @@ class FormularioState(rx.State):
         self.salvar_rascunho_formulario()
         self.limpar_feedback()
 
-    def salvar_respostas(self, form_data: dict) -> dict:
-        respostas = {
-            **self.valores,
-            **{chave: form_valor(form_data, chave) for chave in form_data},
-        }
+    def salvar_respostas(
+        self,
+        form_data: dict,
+        secoes: list | None = None,
+        etapa: int | None = None,
+    ) -> dict:
+        respostas = {**self.valores}
+        campos = campos_etapa(secoes, etapa) if secoes is not None else []
+        nomes = [
+            nome
+            for campo in campos
+            for nome in nomes_campo(campo)
+        ] if campos else list(form_data)
+
+        for nome in nomes:
+            if nome in form_data:
+                respostas[nome] = form_valor(form_data, nome)
+
+        for campo in campos:
+            if campo_visivel(campo, respostas):
+                continue
+            for nome in nomes_campo(campo):
+                respostas.pop(nome, None)
+
         self.valores = respostas
         self.salvar_rascunho_formulario()
         return respostas
@@ -385,8 +419,8 @@ class FormularioState(rx.State):
         formulario: str,
     ):
         secoes = configuracao_formulario(formulario)[0]
-        form_data = self.salvar_respostas(form_data)
         etapa = self.etapa_atual(formulario)
+        form_data = self.salvar_respostas(form_data, secoes, etapa)
         if not self.validar_campos_obrigatorios(
             secoes,
             form_data,
@@ -417,7 +451,11 @@ class FormularioState(rx.State):
             secoes, projeto, nome_chave, cpf_chave,
             email_chave, telefone_chave, curso_chave, exigir_consentimento,
         ) = configuracao_formulario(formulario)
-        form_data = self.salvar_respostas(form_data)
+        form_data = self.salvar_respostas(
+            form_data,
+            secoes,
+            self.etapa_atual(formulario),
+        )
         if not self.validar_campos_obrigatorios(
             secoes,
             form_data,
@@ -446,6 +484,7 @@ class FormularioState(rx.State):
 
     def tratar_erro(self, erro: Exception):
         self.erro = True
+        self.inscricao_enviada = False
         if isinstance(erro, HTTPError):
             self.mensagem = detalhe_erro_http(erro)
         elif isinstance(erro, URLError):
@@ -492,6 +531,7 @@ class FormularioState(rx.State):
             enviar_json("/inscricoes/", dados)
             self.erro = False
             self.mensagem = "Inscrição enviada com sucesso."
+            self.inscricao_enviada = True
             self.remover_rascunho_formulario()
         except Exception as erro:
             self.tratar_erro(erro)
@@ -840,8 +880,8 @@ FORMACAO_SECTIONS = [
                 "Você leu o Edital do projeto? Caso não tenha lido, acesse através do link",
                 "leu_edital",
                 "select",
-                SIM_NAO,
-                label_link=("https://abrelink.me/eVI", "https://abrelink.me/eVI"),
+                SIM_NAO, required=True,
+                label_link=("https://abrelink.me/eVI", "https://abrelink.me/eVI",),
             ),
             q("Escolha seu curso", "curso", "select", FORMACAO_CURSOS_OPCOES, required=True),
         ],
@@ -1173,14 +1213,14 @@ def feedback_publico() -> rx.Component:
     )
 
 
-def nav_publica() -> rx.Component:
-    return rx.hstack(
-        rx.link("Início", href="/"),
-        rx.link("Formação", href="/formacao"),
-        rx.link("Gastronomia", href="/gastronomia"),
-        spacing="5",
-        wrap="wrap",
-        width="100%",
+def link_pagina_inicial() -> rx.Component:
+    return rx.link(
+        "Página inicial",
+        href="/",
+        color=FORM_RED,
+        text_decoration="underline",
+        width="fit-content",
+        _hover={"color": "var(--red-10)"},
     )
 
 
@@ -1204,7 +1244,6 @@ def layout_publico(
     return rx.box(
         rx.box(
             rx.vstack(
-                nav_publica(),
                 *cabecalho,
                 conteudo,
                 spacing="6",
@@ -1246,6 +1285,7 @@ def navegacao_etapas(etapa, total: int, on_voltar) -> rx.Component:
                 background=FORM_RED,
                 color="white",
                 width="180px",
+                _hover={"background": "var(--red-10)", "cursor": "pointer"},
             ),
             justify="between",
             width="100%",
@@ -1344,6 +1384,34 @@ def card_projeto(titulo: str, descricao: str, href: str) -> rx.Component:
     )
 
 
+def tela_confirmacao_inscricao(titulo: str, subtitulo: str) -> rx.Component:
+    return rx.card(
+        cabecalho_formulario(titulo, subtitulo),
+        rx.box(
+            rx.box(
+                rx.text(
+                    "Inscrição enviada com sucesso.",
+                    size="3",
+                    weight="bold",
+                    color="#067647",
+                    align="center",
+                ),
+                role="status",
+                border_radius="8px",
+                padding="1rem",
+                width="100%",
+                background_color="#ecfdf3",
+                border="1px solid #12b76a",
+            ),
+            padding="2rem 3rem 2.5rem",
+            width="100%",
+        ),
+        width="100%",
+        padding="0",
+        overflow="hidden",
+    )
+
+
 def pagina_formulario(
     titulo: str,
     subtitulo: str,
@@ -1356,25 +1424,34 @@ def pagina_formulario(
     return layout_publico(
         titulo,
         subtitulo,
-        rx.card(
-            cabecalho_formulario(titulo, subtitulo),
-            rx.form.root(
-                rx.vstack(
-                    *secoes_por_etapa(secoes, etapa),
-                    feedback_publico(),
-                    navegacao_etapas(etapa, len(secoes), on_voltar),
-                    spacing="4",
+        rx.vstack(
+            link_pagina_inicial(),
+            rx.cond(
+                FormularioState.inscricao_enviada,
+                tela_confirmacao_inscricao(titulo, subtitulo),
+                rx.card(
+                    cabecalho_formulario(titulo, subtitulo),
+                    rx.form.root(
+                        rx.vstack(
+                            *secoes_por_etapa(secoes, etapa),
+                            feedback_publico(),
+                            navegacao_etapas(etapa, len(secoes), on_voltar),
+                            spacing="4",
+                            width="100%",
+                        ),
+                        on_submit=on_submit,
+                        no_validate=True,
+                        reset_on_submit=False,
+                        width="100%",
+                        padding="2rem 3rem 2.5rem",
+                    ),
                     width="100%",
+                    padding="0",
+                    overflow="hidden",
                 ),
-                on_submit=on_submit,
-                no_validate=True,
-                reset_on_submit=False,
-                width="100%",
-                padding="2rem 3rem 2.5rem",
             ),
+            spacing="3",
             width="100%",
-            padding="0",
-            overflow="hidden",
             on_mount=on_mount,
         ),
         exibir_titulo=False,
