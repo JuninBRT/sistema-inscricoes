@@ -29,7 +29,31 @@ frontend/
   requirements.txt
 ```
 
+## Como subir com Makefile
+
+Na raiz do projeto, prepare o ambiente:
+
+```bash
+make setup
+```
+
+Suba API, banco, aplique as migrations e rode o frontend:
+
+```bash
+make up
+```
+
+A API ficará disponível em `http://localhost:8000` e o frontend em `http://localhost:3000`.
+
+Para ver os comandos disponíveis:
+
+```bash
+make
+```
+
 ## Configuração do backend
+
+### Comandos manuais
 
 Crie o arquivo `backend/.env`:
 

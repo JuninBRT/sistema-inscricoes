@@ -1,4 +1,4 @@
-#!/home/junior/workspaces/acao-da-cidadania/sistema-inscricoes/frontend/.venv/bin/python3
+#!/home/junior/workspaces/acao-da-cidadania/sistema-inscricoes/frontend/.venv/bin/python
 # -*- coding: utf-8 -*-
 import re
 import sys
